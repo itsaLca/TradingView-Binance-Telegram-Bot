@@ -8,7 +8,7 @@ from message_filter_functions import *
 class MainBot(object):
     def __init__(self):
         self.client = Binance(config.SPOTTEST_API_KEY, config.SPOTTEST_SECRET_KEY)
-        self.chat_id = None #will be assigned via message
+        self.chat_ids = None #will be assigned via message
         self.user_name_recorded = False
         self.ticker_link = 'https://api.binance.com/api/v3/ticker/price?symbol=' #need to add symbol to the end
         self.general_error_message = "Incorrect syntax or symbol. Please see example below or see /help \n\n" # Add onto the end of this message the specific command syntax needed
@@ -19,108 +19,132 @@ class MainBot(object):
         self.bot = telebot.TeleBot(config.TELEGRAM_BOT_KEY)
         self.updater = Updater(config.TELEGRAM_BOT_KEY, use_context=True)
         self.dp = self.updater.dispatcher
-        self.initial_chat_id_check() #checks if chat_id is already in the DB
         #self.all_bot_actions()
         self.polling_thread = threading.Thread(target=self.all_bot_actions) #The bot will be polling for messages asynchronously as the rest of the app runs
         self.polling_thread.start()
+        self.db = Database()
+        self.chat_ids = self.db.chat_ids()
 
-    def initial_chat_id_check(self):
-        ''' Default chat_id is 0 '''
-        DB = Database()
-        chat_id = DB.chat_id_check()
-        if chat_id != 0:
-            self.chat_id = chat_id
-
-    def correct_user(self, message, db):
+    def correct_user(self, message):
         ''' Check if correct user '''
         username = message.from_user.first_name
-        user = db.user_check()
-        if user == "None" and self.user_name_recorded == False:
-            db.save_username(username)
+        chat_id = message.chat.id
+        allow = self.db.user_check(chat_id,username)
+        if not allow and self.user_name_recorded == False:
+            self.db.save_chat(chat_id,username,True)
+            self.chat_ids = self.db.chat_ids()
             self.user_name_recorded = True
             return True
-        elif user == username:
+        elif allow:
             return True
         else:
+            self.db.save_chat(chat_id,username,False)
+            message.reply_text("access denied")
+            print( "incorrect user. username = "+ username + " self.user_name_recorded "+str( self.user_name_recorded))
             return False
 
     def error_message(self, symbol, quantity, message_type):
         if message_type == "Denied":
-            self.bot.send_message(self.chat_id, "A Binance order for " + str(quantity) + " " + symbol + " has been denied")
+            self.message("A Binance order for " + str(quantity) + " " + symbol + " has been denied")
         else:
-            self.bot.send_message(self.chat_id, "Error: " + message_type)
+            self.message("Error: " + message_type)
 
     def message(self, message):
-        self.bot.send_message(self.chat_id, message)
+        for chat_id in self.chat_ids:
+            self.bot.send_message(chat_id, message)
 
     # ---- All Bot Commands are here ---- #
 
     def initialize_bot(self, update, context):
         #Start Command: /start
-        DB = Database()
+       
         message = update.message
-        if self.correct_user(message, DB):
-            chat_id = message.chat.id
-            DB.save_chat_id(chat_id)
-            self.chat_id = chat_id
+        username = message.from_user.first_name
+        if self.correct_user(message):
             message.reply_text("Hello " + message.from_user.first_name)
             #bot.reply_to(message, "Hello " + message.from_user.first_name)
 
+    def users(self, update, context):
+        #Start Command: /users
+        message = update.message
+        if self.correct_user(message):
+            message.reply_text(self.db.list_chat())
+    
+    def allow(self, update, context):
+        #Start Command: /allow chat_id
+        message = update.message
+
+        strip_command = message.replace("/allow ", "").upper()
+        order_params = strip_command.split()
+        chat_id = int(order_params[0])
+        if self.correct_user(message):
+            allowusername = self.db.allow_chat(chat_id,True)
+            self.message("from " + message.from_user.first_name+" \n "+ "allow "+ allowusername)
+            #bot.reply_to(message, "Hello " + message.from_user.first_name)
+
+    def deny(self, update, context):
+        #Start Command: /deny chat_id
+        message = update.message
+        strip_command = message.replace("/allow ", "").upper()
+        order_params = strip_command.split()
+        chat_id = int(order_params[0])
+        if self.correct_user(message):
+            allowusername = self.db.allow_chat(chat_id,False)
+            self.message("from " + message.from_user.first_name+" \n "+ "deny "+ allowusername)
+            #bot.reply_to(message, "Hello " + message.from_user.first_name)
+
+
+
     def bot_info(self, update, context):
         #Help Command: /help
-        DB = Database()
         message = update.message
-        if self.correct_user(message, DB):
+        if self.correct_user(message):
             help = help_message()
             message.reply_text(help)
             #bot.reply_to(message, help)
 
     def make_market_order(self, update, context):
         #Market order: /market {side} {amount} {symbol}
-        DB = Database()
         message = update.message
-        if self.correct_user(message, DB):
+        if self.correct_user(message):
             try:
                 order_confirmation = self.client.send_order("market", message)
-                message.reply_text(order_confirmation)
+                self.message("from " + message.from_user.first_name+" \n "+order_confirmation)
             except Exception as e:
                 print(str(e))
-                message.reply_text(self.general_error_message + "ex. /market buy 0.01 eth \n\n/market {side} {amount} {symbol}")
+                self.message("from " + message.from_user.first_name+" \n "+ self.general_error_message + "ex. /market buy 0.01 eth \n\n/market {side} {amount} {symbol}")
                 #bot.reply_to(message, self.general_error_message + "ex. /market buy 0.01 eth \n\n/market {side} {amount} {symbol}")
 
     def make_limit_order(self, update, context):
         #Limit order: /limit {timeInForce} {side} {amount} {symbol} at {price}
-        DB = Database()
         message = update.message
-        if self.correct_user(message, DB):
+        if self.correct_user(message):
             try:
                 order_confirmation = self.client.send_order("limit", message)
-                message.reply_text(order_confirmation)
+                self.message("from " + message.from_user.first_name+" \n "+ order_confirmation)
                 #bot.reply_to(message, order_confirmation)
             except Exception as e:
                 print(str(e))
-                message.reply_text(self.general_error_message + "ex. /limit gtc sell 0.01 ethusdt at 1858 \n\n/limit {timeInForce} {side} {amount} {symbol} at {price}")
+                self.message("from " + message.from_user.first_name+" \n "+ self.general_error_message + "ex. /limit gtc sell 0.01 ethusdt at 1858 \n\n/limit {timeInForce} {side} {amount} {symbol} at {price}")
                 #bot.reply_to(message, self.general_error_message + "ex. /limit gtc sell 0.01 ethusdt at 1858 \n\n/limit {timeInForce} {side} {amount} {symbol} at {price}")
 
     def make_stoploss_order(self, update, context):
         #'''Makes only one order: /stoploss {timeInForce} {side} {amount} {symbol} at {price} stop at {stopLoss}'''
-        DB = Database()
         message = update.message
-        if self.correct_user(message, DB):
+        if self.correct_user(message):
             try:
                 order_confirmation = self.client.send_order("stoploss", message)
-                message.reply_text(order_confirmation)
+                self.message("from " + message.from_user.first_name+" \n "+ order_confirmation)
                 #bot.reply_to(message, order_confirmation)
             except Exception as e:
                 print(str(e))
-                message.reply_text(self.general_error_message + "ex. /stoploss gtc sell 0.1 btc at 55000 stop at 56000\n\n /stoploss {timeInForce} {side} {amount} {symbol} at {price} stop at {stopLoss}")
+                self.message("from " + message.from_user.first_name+" \n "+ self.general_error_message + "ex. /stoploss gtc sell 0.1 btc at 55000 stop at 56000\n\n /stoploss {timeInForce} {side} {amount} {symbol} at {price} stop at {stopLoss}")
                 #bot.reply_to(message, self.general_error_message + "ex. /stoploss gtc sell 0.1 btc at 55000 stop at 56000\n\n /stoploss {timeInForce} {side} {amount} {symbol} at {price} stop at {stopLoss}")
 
     def current_price(self, update, context):
         #''' Checks current price of a token '''
-        DB = Database()
         message = update.message
-        if self.correct_user(message, DB):
+        if self.correct_user(message):
             try:
                 quick_token_text = message.text.replace("/ticker", "").replace(" ", "").upper()
                 if "USDT" in quick_token_text:
@@ -139,9 +163,8 @@ class MainBot(object):
     def show_order_history(self, update, context):
         #''' View order history: /orderhistory
         #Sends a csv of their past orders'''
-        DB = Database()
         message = update.message
-        if self.correct_user(message, DB):
+        if self.correct_user(message):
             try:
                 if self.csv_file_name != None:
                     os.remove(self.csv_file_name) #Deletes file once sent
@@ -162,9 +185,8 @@ class MainBot(object):
 
     def show_open_orders(self, update, context):
         #''' View open orders for a given token: /openorders {symbol}'''
-        DB = Database()
         message = update.message
-        if self.correct_user(message, DB):
+        if self.correct_user(message):
             try:
                 quick_token_text = message.text.replace("/openorders", "").replace(" ", "").upper()
                 if "USDT" in quick_token_text:
@@ -180,55 +202,53 @@ class MainBot(object):
 
     def cancel_order(self, update, context):
         #'''Cancels an order /cancel {symbol} {orderId}'''
-        DB = Database()
         message = update.message
-        if self.correct_user(message, DB):
+        if self.correct_user(message):
             try:
                 cancelled_order = self.client.cancel_order(message)
                 cancel_message = cancelled_message(cancelled_order)
-                message.reply_text(cancel_message)
+                self.message("from " + message.from_user.first_name+" \n "+ cancel_message)
                 #bot.reply_to(message, cancel_message)
             except Exception as e:
                 print(str(e))
-                message.reply_text(self.general_error_message + "ex. /cancel eth 6963\n\n/cancel {symbol} {order Id}\n\n")
+                self.message("from " + message.from_user.first_name+" \n "+ self.general_error_message + "ex. /cancel eth 6963\n\n/cancel {symbol} {order Id}\n\n")
                 #bot.reply_to(message, self.general_error_message + "ex. /cancel eth 6963\n\n/cancel {symbol} {order Id}\n\n")
 
     def show_account(self, update, context):
-        DB = Database()
         message = update.message
-        if self.correct_user(message, DB):
+        if self.correct_user(message):
             info = self.client.get_account()
             message.reply_text(str(info))
             #bot.reply_to(message, str(info))
 
     def block_tradingview_orders(self, update, context):
         #''' Temporarily blocks tradingview orders '''
-        DB = Database()
         message = update.message
-        if self.correct_user(message, DB):
+        if self.correct_user(message):
             if self.block_tradingview:
-                message.reply_text("TradingView orders are already blocked. /unblock to continue TradingView orders")
+                self.message("from " + message.from_user.first_name+" \n "+ "TradingView orders are already blocked. /unblock to continue TradingView orders")
                 #bot.reply_to(message, "TradingView orders are already blocked. /unblock to continue TradingView orders")
             else:
                 self.block_tradingview = True
-                message.reply_text("TradingView orders are now blocked. /unblock to continue TradingView orders")
+                self.message("from " + message.from_user.first_name+" \n "+ "TradingView orders are now blocked. /unblock to continue TradingView orders")
                 #bot.reply_to(message, "TradingView orders are now blocked. /unblock to continue TradingView orders")
 
     def unblock_tradingview_orders(self, update, context):
         #''' Unblocks tradingview orders '''
-        DB = Database()
         message = update.message
-        if self.correct_user(message, DB):
+        if self.correct_user(message):
             if self.block_tradingview:
                 self.block_tradingview = False
-                message.reply_text("TradingView orders ready to continue. /block to block TradingView orders")
+                self.message("from " + message.from_user.first_name+" \n "+ "TradingView orders ready to continue. /block to block TradingView orders")
                 #bot.reply_to(message, "TradingView orders ready to continue. /block to block TradingView orders")
             else:
-                message.reply_text("TradingView orders are currently active. /block to block TradingView orders")
+                self.message("from " + message.from_user.first_name+" \n "+ "TradingView orders are currently active. /block to block TradingView orders")
                 #bot.reply_to(message, "TradingView orders are currently active. /block to block TradingView orders")
 
     def kill_app(self, update, context):
         #''' Block TradingView orders and raises an Exception, killing the current Bot thread '''
+        message = update.message
+        self.message("from " + message.from_user.first_name+" \n "+ " block trading")  
         self.block_tradingview = True
         #self.bot_running = False
         #self.bot.stop_polling()
@@ -248,6 +268,10 @@ class MainBot(object):
         self.dp.add_handler(CommandHandler("account", self.show_account))
         self.dp.add_handler(CommandHandler("block", self.block_tradingview_orders))
         self.dp.add_handler(CommandHandler("unblock", self.unblock_tradingview_orders))
+        self.dp.add_handler(CommandHandler("allow", self.allow))
+        self.dp.add_handler(CommandHandler("deny", self.deny))
+        self.dp.add_handler(CommandHandler("users", self.users))
+        
         self.dp.add_handler(CommandHandler("kill", self.kill_app))
 
     # ----  ---- #
@@ -294,9 +318,9 @@ class MainBot(object):
         if len(open_orders_list) > 0:
             for order in open_orders_list:
                 telegram_message = f"Order ID: {order['orderId']}\n" + f"Symbol: {order['symbol']}\n" + f"Price: {order['price']}\n" + f"Original Quantity: {order['origQty']}\n" + f"Executed Quantity: {order['executedQty']}\n" + f"Status: {order['status']}\n" + f"Type: {order['type']}\n" + f"Side: {order['side']}\n" + f"Time In Force: {order['timeInForce']}\n" + f"Stop Price: {order['stopPrice']}"
-                bot.send_message(self.chat_id, telegram_message)
+                self.message(telegram_message)
         else:
-            bot.send_message(self.chat_id, "You have no open orders for " + token)
+            self.message("You have no open orders for " + token)
     # ---- ---- #
 
     # ---- Async Polling Setup ---- #
